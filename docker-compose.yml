@@ -1,0 +1,71 @@
+name: fermentation-kinetics-deviation-analysis
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fermentation-kinetics-deviation-analysis-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fermentation_analysis}
+      POSTGRES_USER: ${POSTGRES_USER:-fermentation}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fermentation_dev}
+    ports:
+      - "${DB_PORT:-57534}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fermentation} -d ${POSTGRES_DB:-fermentation_analysis}"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./backend
+    container_name: fermentation-kinetics-deviation-analysis-backend
+    restart: unless-stopped
+    environment:
+      GIN_MODE: ${GIN_MODE:-release}
+      PORT: "8080"
+      DB_DRIVER: ${DB_DRIVER:-postgres}
+      DB_DSN: ${DB_DSN:-host=db user=fermentation password=fermentation_dev dbname=fermentation_analysis port=5432 sslmode=disable TimeZone=Asia/Shanghai}
+      JWT_SECRET: ${JWT_SECRET:-change-this-fermentation-analysis-secret}
+      JWT_EXPIRY: ${JWT_EXPIRY:-8h}
+      LOGIN_LIMIT_PER_MINUTE: ${LOGIN_LIMIT_PER_MINUTE:-30}
+      IMPORT_LIMIT_PER_MINUTE: ${IMPORT_LIMIT_PER_MINUTE:-30}
+      ANALYSIS_LIMIT_PER_MINUTE: ${ANALYSIS_LIMIT_PER_MINUTE:-60}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
+    ports:
+      - "${BACKEND_PORT:-19534}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 5s
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: fermentation-kinetics-deviation-analysis-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-18534}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/api/healthz"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  postgres_data:
+    name: fermentation-kinetics-deviation-analysis-postgres-data
