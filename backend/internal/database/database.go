@@ -143,6 +143,10 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 	if err != nil {
 		return err
 	}
+	phaseWindows, err := algorithm.DecodePhaseWindows([]byte(boundaries))
+	if err != nil {
+		return err
+	}
 	scientist := users["scientist"]
 	recipes := []model.CultureRecipe{
 		{
@@ -177,19 +181,18 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 	if err != nil {
 		return err
 	}
-	qualityJSON, err := json.Marshal(timeseries.QualitySummary{
-		OriginalPointCount: len(points), UniquePointCount: len(points), DuplicateCount: 0,
-		LongGapCount: 0, MaxGapSeconds: 7200,
-		MissingRate: map[string]float64{"agitation": 0, "do": 0, "ph": 0, "temperature": 0},
-		Channels:    []string{"agitation", "do", "ph", "temperature"}, Warnings: []string{}, Valid: true,
-	})
+	qualityJSON, err := seedQualitySummary(points, phaseWindows)
 	if err != nil {
-		return fmt.Errorf("encode seed quality summary: %w", err)
+		return err
 	}
 	secondPoints := seedPoints(started.Add(26*time.Hour), 0.10)
 	secondPointsJSON, err := timeseries.EncodePoints(secondPoints)
 	if err != nil {
 		return fmt.Errorf("encode second seed points: %w", err)
+	}
+	secondQualityJSON, err := seedQualitySummary(secondPoints, phaseWindows)
+	if err != nil {
+		return err
 	}
 	analyst := users["analyst"]
 	series := []model.SensorSeries{
@@ -198,7 +201,7 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 			Channel: "multichannel", SampleIntervalS: 7200, PointsJSON: pointsJSON,
 			StartedAt: points[0].Timestamp, EndedAt: points[len(points)-1].Timestamp,
 			SourceChecksum: util.HashString(pointsJSON), SeriesState: string(constants.SeriesReady),
-			QualitySummary: string(qualityJSON), NormalizationJSON: normalizationJSON,
+			QualitySummary: qualityJSON, NormalizationJSON: normalizationJSON,
 			ImportedBy: analyst.ID, ImportedByName: analyst.Username, CreatedAt: started, UpdatedAt: started.Add(25 * time.Hour),
 		},
 		{
@@ -206,7 +209,7 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 			Channel: "multichannel", SampleIntervalS: 7200, PointsJSON: secondPointsJSON,
 			StartedAt: secondPoints[0].Timestamp, EndedAt: secondPoints[len(secondPoints)-1].Timestamp,
 			SourceChecksum: util.HashString(secondPointsJSON), SeriesState: string(constants.SeriesImported),
-			QualitySummary: string(qualityJSON), NormalizationJSON: "{}",
+			QualitySummary: secondQualityJSON, NormalizationJSON: "{}",
 			ImportedBy: analyst.ID, ImportedByName: analyst.Username, CreatedAt: now.Add(-4 * time.Hour), UpdatedAt: now.Add(-4 * time.Hour),
 		},
 	}
@@ -293,6 +296,21 @@ func seedPoints(started time.Time, deviation float64) []timeseries.Point {
 		})
 	}
 	return points
+}
+func seedQualitySummary(points []timeseries.Point, phases []timeseries.PhaseWindow) (string, error) {
+	raw, err := timeseries.EncodePoints(points)
+	if err != nil {
+		return "", err
+	}
+	_, quality, err := timeseries.Validate([]byte(raw), "multichannel", 7200, phases)
+	if err != nil {
+		return "", fmt.Errorf("validate seed points: %w", err)
+	}
+	data, err := json.Marshal(quality)
+	if err != nil {
+		return "", fmt.Errorf("encode seed quality summary: %w", err)
+	}
+	return string(data), nil
 }
 func floatPointer(value float64) *float64 { return &value }
 func Close(db *gorm.DB) error {

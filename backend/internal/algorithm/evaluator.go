@@ -212,6 +212,27 @@ func (e *Evaluator) Evaluate(snapshot Snapshot) (Result, error) {
 		SuspectedCausesJSON: string(causesJSON), Explanation: explanation, OverallScore: overall,
 	}, nil
 }
+// DecodePhaseWindows parses a recipe's phase_boundaries_json into elapsed-hour
+// windows used by time-series quality validation.
+func DecodePhaseWindows(boundariesRaw []byte) ([]timeseries.PhaseWindow, error) {
+	var boundaries []PhaseBoundary
+	if err := json.Unmarshal(boundariesRaw, &boundaries); err != nil {
+		return nil, fmt.Errorf("decode phase_boundaries_json: %w", err)
+	}
+	if len(boundaries) == 0 {
+		return nil, fmt.Errorf("phase_boundaries_json must not be empty")
+	}
+	windows := make([]timeseries.PhaseWindow, 0, len(boundaries))
+	for _, boundary := range boundaries {
+		windows = append(windows, timeseries.PhaseWindow{
+			Phase:     string(boundary.Phase),
+			StartHour: boundary.StartHour,
+			EndHour:   boundary.EndHour,
+		})
+	}
+	return windows, nil
+}
+
 func parseConfiguration(boundariesRaw, curvesRaw, toleranceRaw []byte) (
 	[]PhaseBoundary, map[string][]CurvePoint, map[string]ChannelTolerance, error,
 ) {

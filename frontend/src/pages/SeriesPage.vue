@@ -5,12 +5,13 @@ import { FileUp, RefreshCw } from 'lucide-vue-next'
 import AppShell from '../components/common/AppShell.vue'
 import KineticsChart from '../components/common/KineticsChart.vue'
 import PageHeader from '../components/common/PageHeader.vue'
+import PhaseBadge from '../components/common/PhaseBadge.vue'
 import StateBadge from '../components/common/StateBadge.vue'
 import { useAuth } from '../hooks/useAuth'
 import { useRecipeStore } from '../stores/culture-recipe'
 import { useSeriesStore } from '../stores/sensor-series'
 import { useVesselStore } from '../stores/fermentation-vessel'
-import type { SensorPoint, SensorSeries, SeriesState } from '../types/sensor-series'
+import type { PhaseQuality, SensorPoint, SensorSeries, SeriesState } from '../types/sensor-series'
 
 const store = useSeriesStore()
 const recipes = useRecipeStore()
@@ -22,10 +23,24 @@ const saving = ref(false)
 const form = reactive({ recipe_id: undefined as number | undefined, run_code: '', channel: 'multichannel', sample_interval_s: 7200 })
 const publishedRecipes = computed(() => recipes.items.filter((item) => item.recipe_state === 'published'))
 const selectedRecipe = computed(() => recipes.items.find((item) => item.id === form.recipe_id))
+const quality = computed(() => selected.value?.quality_summary ?? {})
 const worstMissing = computed(() => {
-  const rates = Object.values(selected.value?.quality_summary.missing_rate ?? {})
+  const rates = Object.values(quality.value.missing_rate ?? {})
   return rates.length ? Math.max(...rates) : 0
 })
+const phaseRows = computed<PhaseQuality[]>(() => quality.value.phase_quality ?? [])
+const rejectionReason = computed(() => quality.value.rejection_reason ?? '')
+function phaseRateRows(row: PhaseQuality): Array<{ channel: string; rate: number }> {
+  return Object.entries(row.missing_rate ?? {})
+    .map(([channel, rate]) => ({ channel, rate }))
+    .sort((a, b) => b.rate - a.rate || a.channel.localeCompare(b.channel))
+}
+function formatRate(rate: number): string {
+  return `${(rate * 100).toFixed(1)}%`
+}
+function phaseBreached(row: PhaseQuality): boolean {
+  return row.enforced && row.worst_missing_rate > 0.2
+}
 watch(() => store.items, (items) => {
   if (!selected.value || !items.some((item) => item.id === selected.value?.id)) selected.value = items[0] ?? null
   else selected.value = items.find((item) => item.id === selected.value?.id) ?? null
@@ -84,7 +99,7 @@ onMounted(async () => {
 <template>
   <AppShell>
     <div class="page-wrap">
-      <PageHeader eyebrow="MULTICHANNEL EVIDENCE" title="时序工作台" description="检查排序、重复时间戳、缺失率与稳健缩放证据，长间隔始终保留。">
+      <PageHeader eyebrow="MULTICHANNEL EVIDENCE" title="时序工作台" description="按配方四阶段检查各通道缺失率：生长期、产物期逐通道 20% 硬门槛，其余阶段执行整线 35% 门槛。">
         <el-tooltip content="刷新数据"><el-button circle aria-label="刷新" @click="store.load()"><RefreshCw :size="17" /></el-button></el-tooltip>
         <el-button v-if="canImportSeries" type="primary" @click="dialog = true"><FileUp :size="16" />导入时序</el-button>
       </PageHeader>
@@ -108,15 +123,45 @@ onMounted(async () => {
                 {{ selected.series_state === 'imported' ? '执行校验' : selected.series_state === 'validated' ? '稳健缩放' : selected.series_state === 'normalized' ? '标记就绪' : '标记替代' }}
               </el-button>
             </div>
+            <el-alert
+              v-if="selected.series_state === 'rejected' && rejectionReason"
+              class="reject-alert" type="error" :closable="false" show-icon
+              title="校验已拒绝" :description="rejectionReason"
+            />
             <div class="quality-band">
-              <div><span>唯一观测</span><strong>{{ selected.quality_summary.unique_point_count ?? selected.points_json.length }}</strong></div>
-              <div><span>重复时间戳</span><strong>{{ selected.quality_summary.duplicate_count ?? 0 }}</strong></div>
-              <div><span>最长间隔</span><strong>{{ Math.round((selected.quality_summary.max_gap_seconds ?? 0) / 60) }} min</strong></div>
-              <div><span>最高缺失率</span><strong :class="{ 'severity-number': worstMissing > .1 }">{{ (worstMissing * 100).toFixed(1) }}%</strong></div>
+              <div><span>唯一观测</span><strong>{{ quality.unique_point_count ?? selected.points_json.length }}</strong></div>
+              <div><span>重复时间戳</span><strong>{{ quality.duplicate_count ?? 0 }}</strong></div>
+              <div><span>最长间隔</span><strong>{{ Math.round((quality.max_gap_seconds ?? 0) / 60) }} min</strong></div>
+              <div><span>整线最高缺失率</span><strong :class="{ 'severity-number': worstMissing > .35 }">{{ formatRate(worstMissing) }}</strong></div>
+            </div>
+            <div v-if="phaseRows.length" class="phase-quality">
+              <div class="phase-quality-heading">
+                <strong>分阶段通道缺失率</strong>
+                <span>生长期 / 产物期任一通道超过 20% 直接拒绝；延滞期 / 收获期沿用整线 35% 门槛</span>
+              </div>
+              <div class="phase-score-grid">
+                <article v-for="row in phaseRows" :key="row.phase" :class="{ breached: phaseBreached(row) }">
+                  <PhaseBadge :phase="row.phase" />
+                  <div class="phase-worst">
+                    <span>最差通道</span>
+                    <strong :class="{ 'severity-number': phaseBreached(row) }">
+                      {{ row.worst_channel || '—' }} · {{ formatRate(row.worst_missing_rate) }}
+                    </strong>
+                    <small>{{ row.sample_count }} 个阶段样本</small>
+                  </div>
+                  <ul class="phase-rate-list">
+                    <li v-for="item in phaseRateRows(row)" :key="item.channel">
+                      <span>{{ item.channel }}</span>
+                      <em :class="{ over: row.enforced && item.rate > .2 }">{{ formatRate(item.rate) }}</em>
+                    </li>
+                  </ul>
+                  <small class="phase-rule">{{ row.enforced ? '逐通道门槛 20%' : '整线门槛 35%' }}</small>
+                </article>
+              </div>
             </div>
             <KineticsChart :points="selected.points_json" :height="360" />
-            <div v-if="selected.quality_summary.warnings?.length" class="warning-list">
-              <strong>质量提示</strong><span v-for="warning in selected.quality_summary.warnings" :key="warning">{{ warning }}</span>
+            <div v-if="quality.warnings?.length" class="warning-list">
+              <strong>质量提示</strong><span v-for="warning in quality.warnings" :key="warning">{{ warning }}</span>
             </div>
             <dl class="evidence-grid compact">
               <div><dt>来源校验和</dt><dd>{{ selected.source_checksum }}</dd></div>

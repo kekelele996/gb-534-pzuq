@@ -212,6 +212,25 @@ code { font-family: "SFMono-Regular", Consolas, monospace; }
 .phase-score-grid dl div { min-width: 0; }
 .phase-score-grid dt { color: var(--muted); font-size: .55rem; }
 .phase-score-grid dd { margin: 2px 0 0; font-size: .64rem; font-variant-numeric: tabular-nums; }
+
+.reject-alert { margin: 12px 0 0; }
+.phase-quality { margin: 14px 0 4px; }
+.phase-quality-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 8px; }
+.phase-quality-heading strong { font-size: .76rem; }
+.phase-quality-heading span { color: var(--muted); font-size: .63rem; }
+.phase-quality .phase-score-grid { margin-top: 0; }
+.phase-quality article { display: flex; flex-direction: column; gap: 7px; }
+.phase-quality article.breached { background: var(--magenta-soft); border-color: #c691ab; }
+.phase-worst { display: grid; gap: 2px; min-width: 0; }
+.phase-worst span { color: var(--muted); font-size: .58rem; text-transform: uppercase; font-weight: 750; }
+.phase-worst strong { font-size: .78rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.phase-worst small, .phase-rule { color: var(--muted); font-size: .59rem; }
+.phase-rate-list { margin: 0; padding: 6px 0 0; list-style: none; border-top: 1px solid var(--line); display: grid; gap: 3px; }
+.phase-rate-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: .63rem; }
+.phase-rate-list li span { color: #415047; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.phase-rate-list li em { font-style: normal; font-variant-numeric: tabular-nums; font-weight: 750; }
+.phase-rate-list li em.over { color: var(--magenta); }
+.phase-quality article.breached .phase-rule { color: var(--magenta); font-weight: 750; }
 .review-band {
   display: grid; grid-template-columns: minmax(180px, .65fr) minmax(240px, 1fr); gap: 12px 18px;
   margin-top: 18px; padding-top: 14px; border-top: 2px solid var(--ink);

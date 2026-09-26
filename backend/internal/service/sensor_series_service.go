@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"fermentation-kinetics-deviation-analysis/backend/internal/algorithm"
 	"fermentation-kinetics-deviation-analysis/backend/internal/constants"
 	"fermentation-kinetics-deviation-analysis/backend/internal/dto"
 	"fermentation-kinetics-deviation-analysis/backend/internal/model"
@@ -59,7 +60,11 @@ func (s *SensorSeriesService) Import(
 	if recipe.RecipeState != string(constants.RecipePublished) {
 		return dto.SensorSeriesResponse{}, util.NewError(http.StatusConflict, util.CodeStateTransition, "sensor series can only target a published recipe")
 	}
-	points, quality, err := timeseries.Validate(request.PointsJSON, request.Channel, request.SampleIntervalS)
+	phaseWindows, err := algorithm.DecodePhaseWindows([]byte(recipe.PhaseBoundariesJSON))
+	if err != nil {
+		return dto.SensorSeriesResponse{}, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "recipe phase boundaries are invalid", err)
+	}
+	points, quality, err := timeseries.Validate(request.PointsJSON, request.Channel, request.SampleIntervalS, phaseWindows)
 	if err != nil {
 		return dto.SensorSeriesResponse{}, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "time series format is invalid", err)
 	}
@@ -130,9 +135,20 @@ func (s *SensorSeriesService) Transition(
 	before := series
 	pointsJSON, metadataJSON := "", ""
 	if to == constants.SeriesValidated {
-		points, quality, validateErr := timeseries.Validate([]byte(series.PointsJSON), series.Channel, series.SampleIntervalS)
+		recipe, recipeErr := s.recipes.GetByID(ctx, series.RecipeID, false)
+		if recipeErr != nil {
+			if errors.Is(recipeErr, gorm.ErrRecordNotFound) {
+				return dto.SensorSeriesResponse{}, util.NotFound("culture recipe")
+			}
+			return dto.SensorSeriesResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load culture recipe", recipeErr)
+		}
+		phaseWindows, phaseErr := algorithm.DecodePhaseWindows([]byte(recipe.PhaseBoundariesJSON))
+		if phaseErr != nil {
+			return dto.SensorSeriesResponse{}, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "recipe phase boundaries are invalid", phaseErr)
+		}
+		points, quality, validateErr := timeseries.Validate([]byte(series.PointsJSON), series.Channel, series.SampleIntervalS, phaseWindows)
 		if validateErr != nil {
-			return s.rejectAfterValidation(ctx, series, before, actor, validateErr.Error())
+			return s.rejectAfterValidation(ctx, series, before, actor, validateErr.Error(), "")
 		}
 		pointsJSON, err = timeseries.EncodePoints(points)
 		if err != nil {
@@ -144,7 +160,11 @@ func (s *SensorSeriesService) Transition(
 		}
 		metadataJSON = string(qualityBytes)
 		if !quality.Valid {
-			return s.rejectAfterValidation(ctx, series, before, actor, strings.Join(quality.Warnings, "; "))
+			reason := quality.RejectionReason
+			if reason == "" {
+				reason = strings.Join(quality.Warnings, "; ")
+			}
+			return s.rejectAfterValidation(ctx, series, before, actor, reason, metadataJSON)
 		}
 	}
 	if to == constants.SeriesNormalized {
@@ -162,7 +182,13 @@ func (s *SensorSeriesService) Transition(
 		}
 	}
 	if to == constants.SeriesRejected {
-		metadataJSON, _ = util.CanonicalJSON(map[string]any{"valid": false, "warnings": []string{strings.TrimSpace(request.Comment)}})
+		reason := strings.TrimSpace(request.Comment)
+		if reason == "" {
+			reason = "series manually rejected"
+		}
+		metadataJSON, _ = util.CanonicalJSON(map[string]any{
+			"valid": false, "rejection_reason": reason, "warnings": []string{reason},
+		})
 	}
 	changed, err := s.series.Transition(ctx, id, series.SeriesState, request.ToState, pointsJSON, metadataJSON, s.now())
 	if err != nil {
@@ -189,9 +215,14 @@ func (s *SensorSeriesService) Transition(
 	return s.Get(ctx, id)
 }
 func (s *SensorSeriesService) rejectAfterValidation(
-	ctx context.Context, series, before model.SensorSeries, actor util.Actor, reason string,
+	ctx context.Context, series, before model.SensorSeries, actor util.Actor, reason, qualityMetadata string,
 ) (dto.SensorSeriesResponse, error) {
-	metadata, _ := util.CanonicalJSON(map[string]any{"valid": false, "warnings": []string{reason}})
+	metadata := qualityMetadata
+	if metadata == "" {
+		metadata, _ = util.CanonicalJSON(map[string]any{
+			"valid": false, "rejection_reason": reason, "warnings": []string{reason},
+		})
+	}
 	changed, err := s.series.Transition(ctx, series.ID, series.SeriesState, string(constants.SeriesRejected), "", metadata, s.now())
 	if err != nil {
 		return dto.SensorSeriesResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to reject low-quality series", err)
