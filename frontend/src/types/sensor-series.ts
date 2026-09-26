@@ -3,6 +3,13 @@ import type { FermentationVessel } from './fermentation-vessel'
 
 export type SeriesState = 'imported' | 'validated' | 'normalized' | 'ready' | 'rejected' | 'superseded'
 export interface SensorPoint { timestamp: string; values: Record<string, number | null> }
+export interface PhaseMissingSummary {
+  phase: string
+  observed_point_count: number
+  missing_rate: Record<string, number>
+  worst_channel: string
+  worst_missing_rate: number
+}
 export interface QualitySummary {
   original_point_count?: number
   unique_point_count?: number
@@ -10,8 +17,10 @@ export interface QualitySummary {
   long_gap_count?: number
   max_gap_seconds?: number
   missing_rate?: Record<string, number>
+  phase_missing?: PhaseMissingSummary[]
   channels?: string[]
   warnings?: string[]
+  rejection_reason?: string
   valid?: boolean
 }
 

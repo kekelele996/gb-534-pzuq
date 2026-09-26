@@ -3,6 +3,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -59,7 +60,11 @@ func (s *SensorSeriesService) Import(
 	if recipe.RecipeState != string(constants.RecipePublished) {
 		return dto.SensorSeriesResponse{}, util.NewError(http.StatusConflict, util.CodeStateTransition, "sensor series can only target a published recipe")
 	}
-	points, quality, err := timeseries.Validate(request.PointsJSON, request.Channel, request.SampleIntervalS)
+	windows, err := recipePhaseWindows(recipe)
+	if err != nil {
+		return dto.SensorSeriesResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to read recipe phase boundaries", err)
+	}
+	points, quality, err := timeseries.Validate(request.PointsJSON, request.Channel, request.SampleIntervalS, windows)
 	if err != nil {
 		return dto.SensorSeriesResponse{}, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "time series format is invalid", err)
 	}
@@ -130,9 +135,20 @@ func (s *SensorSeriesService) Transition(
 	before := series
 	pointsJSON, metadataJSON := "", ""
 	if to == constants.SeriesValidated {
-		points, quality, validateErr := timeseries.Validate([]byte(series.PointsJSON), series.Channel, series.SampleIntervalS)
+		recipe, recipeErr := s.recipes.GetByID(ctx, series.RecipeID, false)
+		if recipeErr != nil {
+			if errors.Is(recipeErr, gorm.ErrRecordNotFound) {
+				return dto.SensorSeriesResponse{}, util.NotFound("culture recipe")
+			}
+			return dto.SensorSeriesResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load culture recipe", recipeErr)
+		}
+		windows, windowsErr := recipePhaseWindows(recipe)
+		if windowsErr != nil {
+			return dto.SensorSeriesResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to read recipe phase boundaries", windowsErr)
+		}
+		points, quality, validateErr := timeseries.Validate([]byte(series.PointsJSON), series.Channel, series.SampleIntervalS, windows)
 		if validateErr != nil {
-			return s.rejectAfterValidation(ctx, series, before, actor, validateErr.Error())
+			return s.rejectAfterValidation(ctx, series, before, actor, validateErr.Error(), "")
 		}
 		pointsJSON, err = timeseries.EncodePoints(points)
 		if err != nil {
@@ -144,7 +160,7 @@ func (s *SensorSeriesService) Transition(
 		}
 		metadataJSON = string(qualityBytes)
 		if !quality.Valid {
-			return s.rejectAfterValidation(ctx, series, before, actor, strings.Join(quality.Warnings, "; "))
+			return s.rejectAfterValidation(ctx, series, before, actor, strings.Join(quality.Warnings, "; "), metadataJSON)
 		}
 	}
 	if to == constants.SeriesNormalized {
@@ -162,7 +178,8 @@ func (s *SensorSeriesService) Transition(
 		}
 	}
 	if to == constants.SeriesRejected {
-		metadataJSON, _ = util.CanonicalJSON(map[string]any{"valid": false, "warnings": []string{strings.TrimSpace(request.Comment)}})
+		comment := strings.TrimSpace(request.Comment)
+		metadataJSON, _ = util.CanonicalJSON(map[string]any{"valid": false, "warnings": []string{comment}, "rejection_reason": comment})
 	}
 	changed, err := s.series.Transition(ctx, id, series.SeriesState, request.ToState, pointsJSON, metadataJSON, s.now())
 	if err != nil {
@@ -189,9 +206,14 @@ func (s *SensorSeriesService) Transition(
 	return s.Get(ctx, id)
 }
 func (s *SensorSeriesService) rejectAfterValidation(
-	ctx context.Context, series, before model.SensorSeries, actor util.Actor, reason string,
+	ctx context.Context, series, before model.SensorSeries, actor util.Actor, reason, qualityJSON string,
 ) (dto.SensorSeriesResponse, error) {
-	metadata, _ := util.CanonicalJSON(map[string]any{"valid": false, "warnings": []string{reason}})
+	metadata := qualityJSON
+	if metadata == "" {
+		metadata, _ = util.CanonicalJSON(map[string]any{"valid": false, "warnings": []string{reason}, "rejection_reason": reason})
+	} else {
+		metadata = withRejectionReason(metadata, reason)
+	}
 	changed, err := s.series.Transition(ctx, series.ID, series.SeriesState, string(constants.SeriesRejected), "", metadata, s.now())
 	if err != nil {
 		return dto.SensorSeriesResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to reject low-quality series", err)
@@ -208,4 +230,53 @@ func (s *SensorSeriesService) rejectAfterValidation(
 	}
 	return dto.SensorSeriesResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation,
 		"series quality is insufficient and the series was rejected: "+util.CompactText(reason, 240))
+}
+
+// withRejectionReason annotates a fully computed quality summary with the
+// rejection reason while preserving the whole-run and per-phase evidence.
+func withRejectionReason(qualityJSON, reason string) string {
+	var evidence map[string]any
+	if json.Unmarshal([]byte(qualityJSON), &evidence) != nil {
+		metadata, _ := util.CanonicalJSON(map[string]any{"valid": false, "warnings": []string{reason}, "rejection_reason": reason})
+		return metadata
+	}
+	evidence["valid"] = false
+	evidence["rejection_reason"] = reason
+	if existing, ok := evidence["warnings"].([]any); !ok || !containsText(existing, reason) {
+		warnings, _ := evidence["warnings"].([]any)
+		evidence["warnings"] = append(warnings, reason)
+	}
+	metadata, err := util.CanonicalJSON(evidence)
+	if err != nil {
+		return qualityJSON
+	}
+	return metadata
+}
+func containsText(items []any, text string) bool {
+	for _, item := range items {
+		if value, ok := item.(string); ok && value == text {
+			return true
+		}
+	}
+	return false
+}
+
+// recipePhaseWindows converts the selected recipe's phase boundaries into the
+// elapsed-hour windows used by time series validation.
+func recipePhaseWindows(recipe model.CultureRecipe) ([]timeseries.PhaseWindow, error) {
+	var boundaries []struct {
+		Phase     string  `json:"phase"`
+		StartHour float64 `json:"start_hour"`
+		EndHour   float64 `json:"end_hour"`
+	}
+	if err := json.Unmarshal([]byte(recipe.PhaseBoundariesJSON), &boundaries); err != nil {
+		return nil, fmt.Errorf("decode phase_boundaries_json: %w", err)
+	}
+	windows := make([]timeseries.PhaseWindow, 0, len(boundaries))
+	for _, boundary := range boundaries {
+		windows = append(windows, timeseries.PhaseWindow{
+			Phase: boundary.Phase, StartHour: boundary.StartHour, EndHour: boundary.EndHour,
+		})
+	}
+	return windows, nil
 }

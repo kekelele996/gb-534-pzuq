@@ -5,6 +5,7 @@ import { FileUp, RefreshCw } from 'lucide-vue-next'
 import AppShell from '../components/common/AppShell.vue'
 import KineticsChart from '../components/common/KineticsChart.vue'
 import PageHeader from '../components/common/PageHeader.vue'
+import PhaseBadge from '../components/common/PhaseBadge.vue'
 import StateBadge from '../components/common/StateBadge.vue'
 import { useAuth } from '../hooks/useAuth'
 import { useRecipeStore } from '../stores/culture-recipe'
@@ -26,6 +27,14 @@ const worstMissing = computed(() => {
   const rates = Object.values(selected.value?.quality_summary.missing_rate ?? {})
   return rates.length ? Math.max(...rates) : 0
 })
+const phaseLabels: Record<string, string> = { lag: '延滞期', growth: '生长期', production: '产物期', harvest: '收获期' }
+const phaseGroups = computed(() => selected.value?.quality_summary.phase_missing ?? [])
+const criticalPhases = new Set(['growth', 'production'])
+function phaseRateClass(rate: number, phase: string) {
+  const limit = criticalPhases.has(phase) ? 0.2 : 0.35
+  return rate > limit ? 'rate-bad' : rate > 0.1 ? 'rate-warn' : 'rate-ok'
+}
+function formatPercent(rate: number) { return `${(rate * 100).toFixed(1)}%` }
 watch(() => store.items, (items) => {
   if (!selected.value || !items.some((item) => item.id === selected.value?.id)) selected.value = items[0] ?? null
   else selected.value = items.find((item) => item.id === selected.value?.id) ?? null
@@ -114,6 +123,36 @@ onMounted(async () => {
               <div><span>最长间隔</span><strong>{{ Math.round((selected.quality_summary.max_gap_seconds ?? 0) / 60) }} min</strong></div>
               <div><span>最高缺失率</span><strong :class="{ 'severity-number': worstMissing > .1 }">{{ (worstMissing * 100).toFixed(1) }}%</strong></div>
             </div>
+            <div v-if="phaseGroups.length" class="phase-quality">
+              <div class="phase-quality-heading">
+                <strong>分阶段缺失率</strong>
+                <small>生长期 / 产物期任一通道超过 20% 直接拒绝；延滞期 / 收获期按整条 35% 门槛</small>
+              </div>
+              <div class="phase-quality-grid">
+                <div v-for="group in phaseGroups" :key="group.phase" class="phase-quality-card" :class="{ 'phase-critical': criticalPhases.has(group.phase) }">
+                  <div class="phase-card-head">
+                    <PhaseBadge :phase="group.phase" />
+                    <span class="phase-threshold">{{ criticalPhases.has(group.phase) ? '门槛 20%' : '整条 35%' }}</span>
+                  </div>
+                  <div class="phase-worst" :class="phaseRateClass(group.worst_missing_rate, group.phase)">
+                    <span>最差通道</span>
+                    <strong>{{ group.worst_channel || '—' }} · {{ formatPercent(group.worst_missing_rate ?? 0) }}</strong>
+                    <small>{{ group.observed_point_count }} 个阶段内观测</small>
+                  </div>
+                  <ul class="phase-channel-rates">
+                    <li v-for="(rate, channel) in group.missing_rate" :key="`${group.phase}-${channel}`">
+                      <span>{{ channel }}</span>
+                      <i :class="phaseRateClass(rate, group.phase)">{{ formatPercent(rate) }}</i>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            <el-alert
+              v-if="selected.quality_summary.rejection_reason"
+              type="error" :closable="false" show-icon
+              title="校验已拒绝" :description="selected.quality_summary.rejection_reason"
+            />
             <KineticsChart :points="selected.points_json" :height="360" />
             <div v-if="selected.quality_summary.warnings?.length" class="warning-list">
               <strong>质量提示</strong><span v-for="warning in selected.quality_summary.warnings" :key="warning">{{ warning }}</span>

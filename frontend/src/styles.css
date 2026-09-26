@@ -191,6 +191,26 @@ code { font-family: "SFMono-Regular", Consolas, monospace; }
 .chart-empty { height: 100%; display: grid; place-content: center; color: var(--muted); font-size: .72rem; }
 .warning-list { display: grid; gap: 5px; margin-top: 12px; padding: 11px 13px; color: #795115; background: var(--amber-soft); border-left: 3px solid var(--amber); font-size: .67rem; }
 .warning-list strong { font-size: .7rem; }
+.phase-quality { margin: 14px 0; }
+.phase-quality-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+.phase-quality-heading strong { font-size: .74rem; }
+.phase-quality-heading small { color: var(--muted); font-size: .61rem; }
+.phase-quality-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.phase-quality-card { min-width: 0; padding: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 5px; }
+.phase-quality-card.phase-critical { border-top: 3px solid var(--magenta); }
+.phase-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.phase-threshold { color: var(--muted); font-size: .56rem; white-space: nowrap; }
+.phase-worst { display: grid; gap: 2px; margin: 9px 0; padding: 8px 9px; background: #f2f6f3; border-radius: 4px; }
+.phase-worst span { color: var(--muted); font-size: .57rem; }
+.phase-worst strong { font-size: .72rem; font-variant-numeric: tabular-nums; }
+.phase-worst small { color: var(--muted); font-size: .57rem; }
+.phase-channel-rates { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.phase-channel-rates li { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: .63rem; }
+.phase-channel-rates i { font-style: normal; font-variant-numeric: tabular-nums; }
+.rate-ok { color: var(--leaf); }
+.rate-warn { color: #9a6a08; }
+.rate-bad { color: var(--magenta); font-weight: 700; }
+@media (max-width: 900px) { .phase-quality-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 16px 0 0; padding: 0; background: var(--line); border: 1px solid var(--line); }
 .evidence-grid > div { min-width: 0; padding: 10px 12px; background: var(--paper); }
 .evidence-grid dt { margin-bottom: 4px; color: var(--muted); font-size: .59rem; font-weight: 750; text-transform: uppercase; }

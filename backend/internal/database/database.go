@@ -177,12 +177,17 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 	if err != nil {
 		return err
 	}
-	qualityJSON, err := json.Marshal(timeseries.QualitySummary{
-		OriginalPointCount: len(points), UniquePointCount: len(points), DuplicateCount: 0,
-		LongGapCount: 0, MaxGapSeconds: 7200,
-		MissingRate: map[string]float64{"agitation": 0, "do": 0, "ph": 0, "temperature": 0},
-		Channels:    []string{"agitation", "do", "ph", "temperature"}, Warnings: []string{}, Valid: true,
-	})
+	phaseWindows := make([]timeseries.PhaseWindow, 0, 4)
+	for _, boundary := range seedPhaseBoundaries() {
+		phaseWindows = append(phaseWindows, timeseries.PhaseWindow{
+			Phase: string(boundary.Phase), StartHour: boundary.StartHour, EndHour: boundary.EndHour,
+		})
+	}
+	_, seedQuality, err := timeseries.Validate([]byte(pointsJSON), "multichannel", 7200, phaseWindows)
+	if err != nil {
+		return fmt.Errorf("validate seed points: %w", err)
+	}
+	qualityJSON, err := json.Marshal(seedQuality)
 	if err != nil {
 		return fmt.Errorf("encode seed quality summary: %w", err)
 	}
@@ -241,13 +246,16 @@ func seedDomain(tx *gorm.DB, users map[string]model.User) error {
 	}
 	return nil
 }
-func seedRecipeConfiguration() (string, string, string, error) {
-	boundaries := []algorithm.PhaseBoundary{
+func seedPhaseBoundaries() []algorithm.PhaseBoundary {
+	return []algorithm.PhaseBoundary{
 		{Phase: constants.PhaseLag, StartHour: 0, EndHour: 4},
 		{Phase: constants.PhaseGrowth, StartHour: 4, EndHour: 10},
 		{Phase: constants.PhaseProduction, StartHour: 10, EndHour: 20},
 		{Phase: constants.PhaseHarvest, StartHour: 20, EndHour: 24},
 	}
+}
+func seedRecipeConfiguration() (string, string, string, error) {
+	boundaries := seedPhaseBoundaries()
 	references := map[string][]algorithm.CurvePoint{
 		"ph": {}, "temperature": {}, "do": {}, "agitation": {},
 	}

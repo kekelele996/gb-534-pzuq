@@ -11,23 +11,54 @@ type Point struct {
 	Timestamp time.Time           `json:"timestamp"`
 	Values    map[string]*float64 `json:"values"`
 }
-type QualitySummary struct {
-	OriginalPointCount int                `json:"original_point_count"`
-	UniquePointCount   int                `json:"unique_point_count"`
-	DuplicateCount     int                `json:"duplicate_count"`
-	LongGapCount       int                `json:"long_gap_count"`
-	MaxGapSeconds      int64              `json:"max_gap_seconds"`
+// PhaseWindow is the elapsed-hour boundary of one recipe phase, measured from
+// the first observation. Boundaries are treated as inclusive on both ends.
+type PhaseWindow struct {
+	Phase     string  `json:"phase"`
+	StartHour float64 `json:"start_hour"`
+	EndHour   float64 `json:"end_hour"`
+}
+type PhaseMissingSummary struct {
+	Phase              string             `json:"phase"`
+	ObservedPointCount int                `json:"observed_point_count"`
 	MissingRate        map[string]float64 `json:"missing_rate"`
-	Channels           []string           `json:"channels"`
-	Warnings           []string           `json:"warnings"`
-	Valid              bool               `json:"valid"`
+	WorstChannel       string             `json:"worst_channel"`
+	WorstMissingRate   float64            `json:"worst_missing_rate"`
+}
+type QualitySummary struct {
+	OriginalPointCount int                     `json:"original_point_count"`
+	UniquePointCount   int                     `json:"unique_point_count"`
+	DuplicateCount     int                     `json:"duplicate_count"`
+	LongGapCount       int                     `json:"long_gap_count"`
+	MaxGapSeconds      int64                   `json:"max_gap_seconds"`
+	MissingRate        map[string]float64     `json:"missing_rate"`
+	PhaseMissing       []PhaseMissingSummary   `json:"phase_missing,omitempty"`
+	Channels           []string                `json:"channels"`
+	Warnings           []string                `json:"warnings"`
+	RejectionReason    string                  `json:"rejection_reason,omitempty"`
+	Valid              bool                    `json:"valid"`
 }
 type wirePoint struct {
 	Timestamp string              `json:"timestamp"`
 	Values    map[string]*float64 `json:"values"`
 	Value     *float64            `json:"value"`
 }
-func Validate(raw []byte, primaryChannel string, sampleIntervalSeconds int) ([]Point, QualitySummary, error) {
+const (
+	// OverallMissingLimit rejects any channel whose whole-run missing rate
+	// exceeds this share.
+	OverallMissingLimit = 0.35
+	// CriticalPhaseMissingLimit rejects any channel in growth or production
+	// whose in-phase missing rate exceeds this share.
+	CriticalPhaseMissingLimit = 0.20
+)
+// Validate decodes, sorts and deduplicates the observations, then measures
+// channel missing rates over the whole run and, when the recipe's four phase
+// windows are supplied, within each phase. Growth and production enforce a
+// stricter per-channel limit; the remaining phases are covered by the
+// whole-run limit.
+func Validate(
+	raw []byte, primaryChannel string, sampleIntervalSeconds int, phases []PhaseWindow,
+) ([]Point, QualitySummary, error) {
 	var input []wirePoint
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, QualitySummary{}, fmt.Errorf("decode points_json: %w", err)
@@ -99,11 +130,34 @@ func Validate(raw []byte, primaryChannel string, sampleIntervalSeconds int) ([]P
 		}
 		rate := float64(missing) / float64(len(points))
 		summary.MissingRate[channel] = round(rate, 6)
-		if rate > 0.35 {
+		if rate > OverallMissingLimit {
 			summary.Valid = false
-			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s missing rate %.1f%% exceeds 35%%", channel, rate*100))
+			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s missing rate %.1f%% exceeds %.0f%%", channel, rate*100, OverallMissingLimit*100))
 		} else if rate > 0.10 {
 			summary.Warnings = append(summary.Warnings, fmt.Sprintf("%s missing rate %.1f%% requires review", channel, rate*100))
+		}
+	}
+	if len(phases) > 0 {
+		startedAt := points[0].Timestamp
+		summary.PhaseMissing = make([]PhaseMissingSummary, 0, len(phases))
+		for _, phase := range phases {
+			phaseSummary := summarizePhaseMissing(points, startedAt, phase, channelList)
+			summary.PhaseMissing = append(summary.PhaseMissing, phaseSummary)
+			if phase.Phase != "growth" && phase.Phase != "production" {
+				continue
+			}
+			if phaseSummary.ObservedPointCount == 0 {
+				summary.Valid = false
+				summary.Warnings = append(summary.Warnings,
+					fmt.Sprintf("%s phase contains no observations; every channel exceeds %.0f%% missing", phase.Phase, CriticalPhaseMissingLimit*100))
+				continue
+			}
+			if phaseSummary.WorstMissingRate > CriticalPhaseMissingLimit {
+				summary.Valid = false
+				summary.Warnings = append(summary.Warnings,
+					fmt.Sprintf("%s phase channel %s missing rate %.1f%% exceeds %.0f%%",
+						phase.Phase, phaseSummary.WorstChannel, phaseSummary.WorstMissingRate*100, CriticalPhaseMissingLimit*100))
+			}
 		}
 	}
 	expected := time.Duration(sampleIntervalSeconds) * time.Second
@@ -125,6 +179,39 @@ func Validate(raw []byte, primaryChannel string, sampleIntervalSeconds int) ([]P
 			fmt.Sprintf("%d duplicate timestamps were deterministically replaced by the last observation", summary.DuplicateCount))
 	}
 	return points, summary, nil
+}
+// summarizePhaseMissing measures each channel's missing rate among the
+// observations whose elapsed time falls inside the phase window. The worst
+// channel follows channel order so the result is deterministic.
+func summarizePhaseMissing(points []Point, startedAt time.Time, phase PhaseWindow, channelList []string) PhaseMissingSummary {
+	summary := PhaseMissingSummary{Phase: phase.Phase, MissingRate: make(map[string]float64, len(channelList))}
+	inPhase := make([]Point, 0)
+	for _, point := range points {
+		elapsedHours := point.Timestamp.Sub(startedAt).Hours()
+		if elapsedHours >= phase.StartHour && elapsedHours <= phase.EndHour {
+			inPhase = append(inPhase, point)
+		}
+	}
+	summary.ObservedPointCount = len(inPhase)
+	for _, channel := range channelList {
+		if len(inPhase) == 0 {
+			summary.MissingRate[channel] = 1
+			continue
+		}
+		missing := 0
+		for _, point := range inPhase {
+			value, ok := point.Values[channel]
+			if !ok || value == nil {
+				missing++
+			}
+		}
+		summary.MissingRate[channel] = round(float64(missing)/float64(len(inPhase)), 6)
+		if rate := summary.MissingRate[channel]; rate > summary.WorstMissingRate || summary.WorstChannel == "" {
+			summary.WorstChannel = channel
+			summary.WorstMissingRate = rate
+		}
+	}
+	return summary
 }
 func EncodePoints(points []Point) (string, error) {
 	data, err := json.Marshal(points)
